@@ -1,3 +1,8 @@
 node_modules/
 .DS_Store
 *.log
+
+# Python test runs of the bet skills
+__pycache__/
+*.pyc
+.pytest_cache/
