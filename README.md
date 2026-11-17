@@ -33,7 +33,7 @@
 
 pstack is a folder of plain [Agent Skills](https://agentskills.io) (`skills/<name>/SKILL.md`). You don't need [Cursor](https://github.com/cursor/plugins/tree/main/pstack). The [`skills` CLI](https://skills.sh) installs them into Claude Code, Codex, Pi, Cursor, OpenCode, and other agents.
 
-This fork is `niccolox/pstack-bets`. It holds all of pstack plus four bet skills. Install from the fork to get both:
+This fork is `niccolox/pstack-bets`. It holds all of pstack plus five bet skills. Install from the fork to get both:
 
 ```bash
 npx skills add niccolox/pstack-bets
@@ -75,6 +75,7 @@ Some skills call other skills. Install these together:
 | `bet-diligence` | `bet-record`, `how`, `blast-radius`, `technical-writing`, `unslop` |
 | `bet-discovery` | `bet-record` |
 | `bookie` | `bet-record`, `bet-diligence`, `bet-discovery`, `poteto-mode` |
+| `setup-bookie` | `bookie`, `bet-record`, `setup-pstack` |
 
 Skills that spawn subagents point to the Subagents section of `poteto-mode` to pick each subagent's effort. Without `poteto-mode`, they use the default effort.
 
@@ -88,11 +89,12 @@ The mirror also carries two community fixes that aren't upstream yet:
 - `statechart` runs on Windows: it no longer needs `/bin/sh`, reads TLC output with Windows line endings, and cleans up its temp folder after a killed run. Patch by [@yasuyuki](https://github.com/yasuyuki). ([#17](https://github.com/backnotprop/pstack/issues/17))
 ## What this fork adds
 
-This fork adds four skills that keep a product bet honest. A bet is a product idea that gets a fast build, real users, and a go, no-go, or pivot decision on a fixed date. Each skill starts only from its slash command.
+This fork adds five skills that keep a product bet honest. A bet is a product idea that gets a fast build, real users, and a go, no-go, or pivot decision on a fixed date. Each skill starts only from its slash command.
 
 | Skill | What it does |
 |---|---|
-| `bookie` | Runs one bet through ten stages: frame, build-or-buy, scope, evals, build, harden, users, iterate, score, memo. It asks the operator each product call through the question tool, checks a gate before each next stage, and keeps progress so a later call continues at the same stage. |
+| `setup-bookie` | Sets up a project in one pass, in place of `setup-pstack`. It writes the pstack model settings into the project, writes `AGENTS.md`, `CLAUDE.md`, `PRODUCTS.md`, `DESIGN.md`, and `.gitignore`, turns `setup-pstack` off for the project, and commits. |
+| `bookie` | Runs one bet through eleven stages: setup, frame, build-or-buy, scope, evals, build, harden, users, iterate, score, memo. It asks the operator each product call through the question tool and checks a gate before each next stage. It commits each stage to git on a bet branch, saves each prompt it uses to `.local/`, and keeps progress so a later call continues at the same stage. |
 | `bet-record` | Frames a bet's core question, kill criteria, and decision date before code. Logs one row for each verified unit, scores the criteria from evidence, and writes the memo. An operator dialog confirms the criteria and the decision. |
 | `bet-diligence` | Reviews the code, the team, and the market of a dependency, product, or company, and writes a memo with evidence for each finding. |
 | `bet-discovery` | Plans customer interviews about past behavior and logs only what people did, from a second call up to a payment. |
@@ -104,35 +106,39 @@ This fork adds four skills that keep a product bet honest. A bet is a product id
 1. Install the skills from the project root. Add `-a claude-code`, or the name of another agent, to skip the agent prompt:
 
    ```bash
-   npx skills add niccolox/pstack-bets -s bookie -s bet-record -s bet-diligence -s bet-discovery --copy
+   npx skills add niccolox/pstack-bets -s setup-bookie -s bookie -s bet-record -s bet-diligence -s bet-discovery -s setup-pstack --copy
    ```
 
-   `bookie` reads the `bet-record` scripts from the folder beside it, so install the four skills together. Add `-s poteto-mode` and the `principle-*` skills to get the build stage's playbook, or use `--all` to install everything.
+   `bookie` and `setup-bookie` read scripts from the skill folders beside them, so install these skills together. Add `-s poteto-mode` and the `principle-*` skills to get the build stage's playbook, or use `--all` to install everything.
 
-2. Name the bet record in the project `CLAUDE.md` or `AGENTS.md`, so that every bet skill and `poteto-mode` find it:
+2. Set up the project in your agent:
 
-   ```markdown
-   The bet record is `docs/bet-process.md`. The `bet-record` skill in `.claude/skills/bet-record/` reads and checks it.
+   ```text
+   /setup-bookie
    ```
 
-   With no line, the skills use `docs/bet-process.md`.
+   The skill picks the pstack models and writes them to the project. It asks for the stack and the surface, then writes `AGENTS.md`, `CLAUDE.md`, `PRODUCTS.md`, `DESIGN.md`, and `.gitignore`. A file that exists keeps its text and gets only its missing lines. The skill turns `/setup-pstack` off for the project and makes one commit on the branch `setup/bookie`.
 
-3. Start the first bet in your agent:
+3. Start the first bet:
 
    ```text
    /bookie
    ```
 
-   The skill asks for one paragraph about the problem, then runs the frame stage. Later, `/bookie BET-001` continues at the stage where the last run stopped.
+   The skill asks for one paragraph about the problem, then runs the stages in order. Later, `/bookie BET-001` continues at the stage where the last run stopped.
 
-4. Commit `skills-lock.json` and the record. The progress file is `<record folder>/bookie/BET-NNN.json`. Commit it too when the team shares the bet.
+What bookie does on each stage:
+
+- **It commits.** Each finished or skipped stage is one local commit, `bookie(BET-NNN): <stage> done`, on the branch `bet/bet-nnn`. In a folder with no repository, it runs `git init` first. Files named like secrets stay out of the commit. It never pushes.
+- **It saves prompts.** Each filled prompt goes to `.local/bookie/BET-NNN/prompts/`. `.local/` is in `.gitignore`, so prompts stay out of git.
+- **It keeps progress.** The progress file is `<record folder>/bookie/BET-NNN.json`. The bet record is `docs/bet-process.md` unless `AGENTS.md` or `CLAUDE.md` names another path.
 
 To update the skills later, run `npx skills update`, then read `git diff`. An update can replace changes that you made to an installed skill.
 
 Each bet skill has a checker script with tests:
 
 ```bash
-python3 -m pytest skills/bet-record/scripts skills/bet-diligence/scripts skills/bookie/scripts
+python3 -m pytest skills/bet-record/scripts skills/bet-diligence/scripts skills/bookie/scripts skills/setup-bookie/scripts
 ```
 <!-- mirror:end -->
 

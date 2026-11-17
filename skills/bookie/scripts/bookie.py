@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one bet from frame to memo, one stage at a time. Prints JSON for the agent."""
+"""Run one bet from setup to memo, one stage at a time. Prints JSON for the agent."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "bet-record" / "scr
 
 from bet_dialog import MAX_QUESTIONS, Question, frame_questions, memo_questions
 from check_bet import DATE, Bet, check_file, parse, strip_fences, table
+from persist import commit, ensure_ignored, save_prompt, saved_prompts
+from scaffold import STACKS, SURFACES, check, scaffold, setup_questions
 
 Entry = dict[str, object]
 Option = tuple[str, str]
@@ -62,6 +64,10 @@ def checklist(question: str, header: str, items: tuple[Option, ...]) -> list[Que
 
 def no_questions(bet: Bet, today: dt.date) -> list[Question]:
     return []
+
+
+def setup(bet: Bet, today: dt.date) -> list[Question]:
+    return setup_questions(f"{bet.bet_id}: ")
 
 
 def frame_stage(bet: Bet, today: dt.date) -> list[Question]:
@@ -222,6 +228,10 @@ def field(bet: Bet, name: str) -> str:
     return bet.fields.get(name, ("Open", 0))[0]
 
 
+def gate_setup(bet: Bet, entry: Entry, record: Path, today: dt.date) -> str | None:
+    return check(Path(str(entry.get("root", "."))), record)
+
+
 def gate_frame(bet: Bet, entry: Entry, record: Path, today: dt.date) -> str | None:
     problems = [p for p in check_file(record, today) if bet.bet_id in p]
     if problems:
@@ -294,9 +304,20 @@ class Stage:
     questions: Callable[[Bet, dt.date], list[Question]]
     gate: Gate
     skippable: bool = True
+    needs_bet: bool = True
 
 
 STAGES: tuple[Stage, ...] = (
+    Stage(
+        "setup",
+        "Write AGENTS.md, CLAUDE.md, PRODUCTS.md, and DESIGN.md for the project.",
+        "",
+        (3,),
+        ("Principles", "Scope", "Agent ladder", "Evals", "Production", "Safety"),
+        setup,
+        gate_setup,
+        needs_bet=False,
+    ),
     Stage(
         "frame",
         "Write the core question, the kill criteria, and the decision date.",
@@ -424,8 +445,16 @@ def current(progress: dict[str, Entry]) -> Stage | None:
 
 
 def describe(
-    stage: Stage, bet: Bet | None, entry: Entry, record: Path, today: dt.date
+    stage: Stage,
+    bet_id: str,
+    bet: Bet | None,
+    entry: Entry,
+    record: Path,
+    today: dt.date,
+    root: Path,
 ) -> dict[str, object]:
+    if bet is None and not stage.needs_bet:
+        bet = Bet(bet_id, 0)
     if bet is None:
         gate, questions = f"{record} has no section for this bet", []
     else:
@@ -439,6 +468,7 @@ def describe(
         "prompts": list(stage.prompts),
         "practices": list(stage.practices),
         "gate": gate or "passed",
+        "prompts_saved": len(saved_prompts(root, bet_id, stage.name)),
         "calls": [
             {"questions": questions[i : i + MAX_QUESTIONS]}
             for i in range(0, len(questions), MAX_QUESTIONS)
@@ -446,12 +476,13 @@ def describe(
     }
 
 
-def next_stage(record: Path, bet_id: str, today: dt.date) -> dict[str, object]:
+def next_stage(record: Path, bet_id: str, today: dt.date, root: Path) -> dict[str, object]:
     progress = load_progress(record, bet_id)
     stage = current(progress)
     if stage is None:
         return {"stage": None, "result": "every stage is done or skipped"}
-    return describe(stage, find_bet(record, bet_id), progress.get(stage.name, {}), record, today)
+    entry = progress.get(stage.name, {})
+    return describe(stage, bet_id, find_bet(record, bet_id), entry, record, today, root)
 
 
 def status(record: Path, bet_id: str) -> list[dict[str, object]]:
@@ -479,7 +510,8 @@ def finish(
     answers: dict[str, str] | None = None,
     note: str | None = None,
     skip: bool = False,
-) -> str:
+    root: Path,
+) -> dict[str, object]:
     progress = load_progress(record, bet_id)
     stage = current(progress)
     if stage is None or stage.name != name:
@@ -500,21 +532,63 @@ def finish(
     if note:
         entry["note"] = note
     if not skip:
-        bet = find_bet(record, bet_id)
+        bet = find_bet(record, bet_id) or (None if stage.needs_bet else Bet(bet_id, 0))
         problem = (
             f"{record} has no section for {bet_id}"
             if bet is None
             else stage.gate(bet, entry, record, today)
         )
+        if not problem and stage.prompts and not saved_prompts(root, bet_id, name):
+            numbers = ", ".join(str(n) for n in stage.prompts)
+            problem = (
+                f"no prompt saved; save each filled prompt ({numbers}) with the prompt command"
+            )
         if problem:
             progress[name] = entry
             save_progress(record, bet_id, progress)
             raise SystemExit(f"{name} gate: {problem}")
-    entry.update(status="skipped" if skip else "done", date=today.isoformat())
+    state = "skipped" if skip else "done"
+    entry.update(status=state, date=today.isoformat())
     progress[name] = entry
     save_progress(record, bet_id, progress)
     following = current(progress)
-    return following.name if following else "none"
+    sha, left_out = commit(root, f"bet/{bet_id.lower()}", f"bookie({bet_id}): {name} {state}")
+    return {
+        "stage": name,
+        "status": state,
+        "next": following.name if following else None,
+        "commit": sha,
+        "left_out": left_out,
+    }
+
+
+def run_scaffold(
+    record: Path, bet_id: str, root: Path, stack: str, surface: str
+) -> list[tuple[str, str]]:
+    progress = load_progress(record, bet_id)
+    stage = current(progress)
+    if stage is None or stage.name != "setup":
+        raise SystemExit("scaffold runs only in the setup stage")
+    actions = scaffold(root, record, stack, surface)
+    ensure_ignored(root)
+    entry = dict(progress.get("setup", {}))
+    entry.update(root=str(root.resolve()), answers={"Stack": stack, "Surface": surface})
+    progress["setup"] = entry
+    save_progress(record, bet_id, progress)
+    return actions
+
+
+def run_prompt(
+    record: Path, bet_id: str, root: Path, number: int, text: str, today: dt.date
+) -> Path:
+    stage = current(load_progress(record, bet_id))
+    if stage is None:
+        raise SystemExit("every stage is done or skipped")
+    return save_prompt(root, bet_id, stage.name, number, text, today)
+
+
+def stored_root(record: Path, bet_id: str) -> Path:
+    return Path(str(load_progress(record, bet_id).get("setup", {}).get("root", ".")))
 
 
 def parse_answers(pairs: list[str]) -> dict[str, str]:
@@ -531,21 +605,36 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("record", type=Path)
     parser.add_argument("bet_id")
-    parser.add_argument("command", choices=("next", "status", "done", "skip"))
+    parser.add_argument("command", choices=("next", "status", "scaffold", "prompt", "done", "skip"))
     parser.add_argument("stage", nargs="?", choices=sorted(BY_NAME))
     parser.add_argument("--evidence")
     parser.add_argument("--answer", action="append", default=[])
     parser.add_argument("--note")
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--number", type=int)
+    parser.add_argument("--stack", choices=sorted(STACKS))
+    parser.add_argument("--surface", choices=sorted(SURFACES))
     parser.add_argument("--today", type=dt.date.fromisoformat, default=dt.date.today())
     args = parser.parse_args(argv)
+    root = args.root or stored_root(args.record, args.bet_id)
     if args.command == "next":
-        print(json.dumps(next_stage(args.record, args.bet_id, args.today), indent=1))
+        print(json.dumps(next_stage(args.record, args.bet_id, args.today, root), indent=1))
     elif args.command == "status":
         print(json.dumps(status(args.record, args.bet_id), indent=1))
+    elif args.command == "scaffold":
+        if not (args.stack and args.surface):
+            parser.error("scaffold needs --stack and --surface")
+        actions = run_scaffold(args.record, args.bet_id, root, args.stack, args.surface)
+        print(json.dumps(dict(actions), indent=1))
+    elif args.command == "prompt":
+        if args.number is None:
+            parser.error("prompt needs --number and the filled prompt on stdin")
+        path = run_prompt(args.record, args.bet_id, root, args.number, sys.stdin.read(), args.today)
+        print(path)
     else:
         if not args.stage:
             parser.error(f"{args.command} needs a stage")
-        following = finish(
+        result = finish(
             args.record,
             args.bet_id,
             args.stage,
@@ -554,8 +643,9 @@ def main(argv: list[str] | None = None) -> int:
             answers=parse_answers(args.answer),
             note=args.note,
             skip=args.command == "skip",
+            root=root,
         )
-        print(f"{args.stage} {args.command}; next stage: {following}")
+        print(json.dumps(result, indent=1))
     return 0
 
 
